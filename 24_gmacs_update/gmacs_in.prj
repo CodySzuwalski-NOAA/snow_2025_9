@@ -1,0 +1,122 @@
+# TheHeader
+## GMACS Version 2.20.22; ** AEP & WTS **; Compiled 2025-03-31
+# Calc_MSY
+0
+0 #--Pot_Fishery
+1 #--Trawl_Bycatch
+1 #--NMFS_Trawl_1982
+1 #--NMFS_Trawl_1989
+# spr_syr
+1982
+# spr_nyr
+2022
+# spr_SexR_syr
+1982
+# spr_SexR_nyr
+2022
+# spr_aveF_syr
+2011
+# spr_aveF_nyr
+2021
+# spr_M_syr
+1982
+# spr_M_nyr
+2017
+# spr_Prop_syr
+1982
+# spr_Prop_nyr
+2022
+# spr_grow_yr
+1982
+# spr_sel_syr
+1982
+# spr_sel_nyr
+2022
+# spr_target
+0.35
+# OFLTier
+3
+# OFLalpha
+0.1
+# OFLbeta
+0.25
+# OFLgamma
+1
+# ABCBuffer
+0.8
+# Compute_yield_prj
+0
+# pyr
+2031
+# Project_type
+1
+# prj_Nstrat
+2
+# Proj_Levels
+ 0 1.59
+# prj_bycatch_on
+1
+# prj_replicates
+2
+# Fixed_prj_Bmsy
+-3423.8
+# proj_syr
+1982
+# proj_nyr
+2017
+# proj_SexR_syr
+1982
+# proj_SexR_nyr
+2017
+# proj_aveF_syr
+2011
+# proj_aveF_nyr
+2021
+# proj_M_syr
+1982
+# proj_M_nyr
+2017
+# proj_Prop_syr
+1982
+# proj_Prop_nyr
+2023
+# proj_grow_yr
+2023
+# proj_sel_syr
+1982
+# proj_sel_nyr
+2023
+# Options for the stock-recruitment relationship
+#    1: Sample recruitments from those for a pre-specified range of years
+#    2: Ricker stock-recruitment relationship
+#    3: Beverton-Holt stock-recruitment relationship
+#    4: Pre-specified (constant) future recruitment 
+1
+# Age_at_rec_prj
+5
+# prj_futRec_syr
+1982
+# prj_futRec_nyr
+2017
+# mean_rec_prj
+10000
+# SigmaR_prj
+0.6
+# Prow_prj
+0
+# Initial_eps
+0
+# Apply_HCR_prj
+1
+# Apply_StateHCR_prj
+1
+# NHCRpars
+2
+# HCRpars
+ 0.00172963 0.00193093
+# max_prj
+10000
+# full_prj_diag
+1
+# eof_prj
+9999

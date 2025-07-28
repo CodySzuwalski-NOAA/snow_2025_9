@@ -1,0 +1,1419 @@
+---
+author: "Cody Szuwalski and Grant Adams"
+date: "May 5, 2025"
+output:
+  pdf_document:
+    fig_caption: yes
+    fig_height: 4
+    fig_width: 6
+header-includes:   
+-  \pagenumbering{gobble}
+-  \usepackage{pdfpages}
+number_sections: yes
+csl: fish-and-fisheries.csl
+toc: yes
+title: "A preliminary assessment for eastern Bering Sea snow crab"
+---
+
+```{r, include=FALSE}
+
+rm(list=ls())
+#tinytex::reinstall_tinytex(repository = "illinois")
+knitr::opts_chunk$set(echo=FALSE,message=FALSE,warning=FALSE)
+
+library(plyr)
+library(dplyr)
+library(knitr)
+library(ggplot2)
+library(PBSmodelling)
+library(pander)
+library(coda)
+library(maps)
+library(lattice)
+library(PBSmapping)
+library(mapdata)    #some additional hires data
+library(maptools)   #useful tools such as reading shapefiles
+library(mapproj)
+library(plotrix)
+library(ggridges)
+library(reshape2)
+library(miceadds)
+library(devtools)
+library(patchwork)
+
+
+in_path<-"C:/Users/cody.szuwalski/Work/gmr/R/"
+source.all( path=in_path, grepstring="\\.R",  print.source=TRUE, file_sep="__"  )
+
+in_path<-"C:/Users/cody.szuwalski/Work/gmacsr/R/"
+source.all( path=in_path, grepstring="\\.R",  print.source=TRUE, file_sep="__"  )
+
+```
+
+\newpage
+
+
+```{r GMACS-getModelResults}
+require(wtsGMACS);
+reslst = wtsUtilities::getObj("rda_ModelsResLst.RData");
+cases = names(reslst$repsLst);
+nCases = length(cases);
+strMdls = "models";
+strCases = cases[1]; i=2;
+while (i < nCases) {strCases = paste0(strCases,", ",cases[i]); i=i+1;}
+if (nCases != 1) strCases = paste0(strCases," and ",cases[nCases]);
+if (nCases == 1) strMdls = "model";
+strCases = stringr::str_replace_all(strCases,stringr::fixed("_"),".")
+```
+
+\newpage
+
+```{r,echo=F,message=FALSE,warning=F,include=FALSE}
+
+ABC_buffer  <-0.8
+chosen_ind<-1
+OFL_fleet_ind<-0
+
+# #===PULL gmacs DATA AND outputs
+mod_names <- c(
+  "24.1 status quo")
+ScenarioNames<-mod_names
+
+# needs terminal backslash
+.MODELDIR = c(paste0(dirname(getwd()), "/snow_2025_9/24_gmacs_sq/"))
+
+.THEME    = theme_bw(base_size = 12, base_family = "") +
+  theme(strip.text.x = element_text(margin= margin(1,0,1,0)),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank(),
+        strip.background = element_rect(color="white",fill="white"))
+
+.OVERLAY  = TRUE
+
+#==some of this repeats info in the .DAT file and should be read directly, rather than
+#==repeated here (e.g. .FLEET and .SEAS)
+.SEX      = c("undetermined","male","female")
+.FLEET    = c("Pot_Fishery","Trawl_Bycatch","NMFS_Trawl_1982","NMFS_Trawl_1989")
+.All_FLEET    = c("Pot_Fishery","Trawl_Bycatch","NMFS_Trawl_1982","NMFS_Trawl_1989")
+
+.TYPE     = c("total","retained","discarded")
+.SHELL    = c("New","Old")
+.MATURITY = c("Aggregate","Mature","Immature")
+.SEAS     = c("1","2","3")
+
+fn       <- paste0(.MODELDIR, "gmacs")
+M        <- lapply(fn, read_admb) #need .prj file to run gmacs and need .rep file here
+names(M) <- mod_names
+
+do_size_comps<-0
+if(do_size_comps==1)
+{
+  ##--size comps from Buck----
+  dfrZCs = wtsGMACS::extractRep1Results(reslst,"Size_fit_summary") |> 
+             dplyr::mutate(
+               dplyr::across(c(year,size,inpSS,inpN,aggObs,aggPrd,aggRes),
+                             as.numeric)
+             );
+  flts = (dfrZCs |> dplyr::distinct(fleet))$fleet;
+  dfrUFCs = dfrZCs |> dplyr::distinct(origID,aggID,fleet,comp_type,sex,maturity,shell_cond,case) |> 
+             dplyr::mutate(fleet=factor(fleet,levels=flts))
+  dfrUFCs = dfrUFCs |> 
+             dplyr::inner_join(dfrUFCs |> 
+                               dplyr::group_by(aggID,case) |> 
+                               dplyr::summarize(ext=dplyr::n()) |> 
+                               dplyr::ungroup(),by=c("aggID","case"));
+  dfrUZCs = dfrUFCs |> 
+             dplyr::distinct(comp_type,fleet,ext,sex,maturity,shell_cond) |>
+             dplyr::arrange(comp_type,fleet,dplyr::desc(ext),dplyr::desc(sex),maturity,shell_cond);
+  pltZCs<-function(dfrZCs,dfrUFCs,dfrUZC){
+    dfrUFC = dfrUFCs |> dplyr::inner_join(dfrUZC,by=names(dfrUZC));#--pick unique fleet, bio cats, & cases
+    tmp = dfrZCs |> dplyr::inner_join(dfrUFC,by=names(dfrUFC)[names(dfrUFC)!="ext"]);
+    str = paste(dfrUZC$fleet,dfrUZC$comp_type);
+    if (dfrUZC$shell_cond!="undetermined") str = paste(str,dfrUZC$shell_cond);
+    if (dfrUZC$maturity  !="undetermined") str = paste(str,dfrUZC$maturity);
+    if (dfrUZC$sex       !="undetermined") str = paste0(str," ",dfrUZC$sex,"s");
+    p = compareFitsZCs(tmp,subtitle=str);
+    return(p);
+  }
+
+  mdf <- .get_sizeComps_df(M)
+  
+   for (i in 1:nrow(dfrUZCs))
+    {
+     
+     sq_tmp<-mdf[[i]]
+     t_flt<-unique(sq_tmp$fleet)
+     t_sex<-unique(sq_tmp$sex)
+     t_type<-unique(sq_tmp$type)
+     t_mat<-unique(sq_tmp$maturity)
+     
+     if(t_mat=="Aggregate")
+       t_mat<-"undetermined"
+     
+     if(t_mat=="Mature")
+       t_mat<-"mature"
+     if(t_mat=="Immature")
+       t_mat<-"immature"
+     
+     chk<-dfrUZCs[,c(1,2,4,5)]
+     
+     take_bucks<-intersect(intersect(intersect(which(!is.na(match(unlist(chk[,1]),t_type))),
+                                               which(!is.na(match(unlist(chk[,2]),t_flt)))),
+                                     which(!is.na(match(unlist(chk[,3]),t_sex)))),
+                           which(!is.na(match(unlist(chk[,4]),t_mat))))
+     
+     dfrUFC = dfrUFCs |> dplyr::inner_join(dfrUZCs[take_bucks,],by=names(dfrUZCs[take_bucks,]));
+     tmp = dfrZCs |> dplyr::inner_join(dfrUFC,by=names(dfrUFC)[names(dfrUFC)!="ext"]);
+    
+     use_tmp<-tmp[,c(3,5,6,7,10,13,14,16)]
+     use_sq<-sq_tmp[,c(1,2,4,5,6,10,11,12)]
+
+     colnames(use_tmp)[c(3,6,7,8)]<-c("type","obs","pred","model")
+     colnames(use_sq)[c(6,7)]<-c("size","obs")
+     
+     
+     plot_dat<-rbind(use_sq,use_tmp[,c(8,1,2,4,3,5,6,7)])
+     
+   p<- ggplot()+
+      geom_bar(data=filter(plot_dat,model=="24.1 status quo"),aes(x=as.numeric(as.character(size)),y=obs),stat = "identity", position = "identity",col='lightgrey',fill='lightgrey')+
+      geom_line(data=plot_dat,aes(x=as.numeric(as.character(size)),y=pred,col=model))+
+      facet_wrap(~year)+theme_bw()+xlab("Carapace width (mm)")+ylab("Proportion")
+     ggtitle(paste(t_flt,"/",t_sex,"/",t_type,"/",t_mat))
+     
+    png(paste("plots/size_comp_",i,".png",sep=""),height=8,width=8,res=300,units='in')
+    print(p)
+    dev.off()
+
+   }
+}
+```
+
+
+# A. Executive summary
+
+The eastern Bering Sea snow crab population has been at historically low abundances for commercially preferred crab for nearly a decade. Federal reference points are in flux, given status quo proxies allow for removal of all commercially preferred crab. Abundances of small crab are showing signs of recovery after the 2018-2019 marine heatwave and subsequent population collapse. Several topics relevant to the assessment and management of snow crab are considered in this document, including: 
+
+**GMACS assessment scenarios.** Large changes to GMACS have occurred since the version for snow crab was updated. The state has also provided revised catch data for snow crab. Both of these changes produced changes in assessment output. Updated growth data were also included, nearly doubling the number of observation used in the assessment. Three other scenarios responsive to SSC requests related to maturity and selectivity are included here. None of those scenarios addressed issues with reference points. Ultimately the assessment is not contributing to the stock decline because it has never influenced removals, so the topics below were considered to facilitate discussion around how to identify management strategies to address the negative population trends and recent historic lows. 
+
+**Mortality events drive Bering Sea crab populations.** Boom and bust dynamics for Bering Sea crab are common; several assessments require estimating mortality events to fit the survey data. The median estimate of fishable abundance during 2023 across six Bering Sea crab populations was less than 5% of the maximum observed. Most large population declines appear unrelated to crab fisheries; episodic mortality and recruitment failure are the key drivers. Density dependent effects, temperature, and size explain a significant portion of the variability in mortality for all populations examined. Incorporating episodic mortality events into management projections lowers expected yields and biomasses. If these lower expectations for biomass are incorporated into reference points, more fishing would be allowed during periods of low abundance, which is a counter intuitive management response.
+
+**Is spatial depletion in the fishery a problem?** Assessment of snow crab is performed on fishery-independent data and at the population level. However, spatial catch-per-unit-effort data from the fishery also exist and can be used to evaluate the impact of the fishery on the population from another perspective. We show that there is considerable spatio-temporal heterogeneity in the observed depletion rates, but do not find persuasive evidence to suggest that management should move to a spatially-explicit framework. Discussion around what would be persuasive evidence would be useful from the plan team.
+
+**Historical biases in biomass are not a problem.** Recent analyses have questioned the use of stock assessment in fisheries management, noting 'historical biases' (i.e. management historically thought the population was larger than it is based on assessment outputs) are more common in stocks that are at relatively low biomasses than those that are not. Eastern Bering Sea crab were included in these analyses and large historical biases were reported. We show that these historical biases were spurious in some instances for EBS crab and largely a non-issue when actual removals were considered.  
+
+**Where do we go from here?** I continue to recommend focusing management for snow crab on the large males because without them, a fishery cannot occur. Effort should be made to bring the state and federal systems together so that 1) the downward trajectories of crab stocks can be addressed (if possible), 2) we no longer provide conflicting management advice, and 3) increasingly limited resources are used efficiently to provide desired management outcomes. Given struggles with sensible reference points within the assessment, working backwards from what has actually occurred (i.e. TACs determined by the state HCR) and attempting to identify reasonable targets for fishing mortality and biomass from there may be more fruitful than continued modeling with no new data to inform uncertain processes like reproductive dynamics. 
+
+
+\newpage
+
+
+# B. SSC comments 
+
+*The highest priority would be to continue to refine the Maximin analysis as requested by the SSC in June 2024, specifically using values of steepness of 0.50, 0.67, and 0.80, and considering both the Beverton-Holt and Ricker stock recruitment relationships. The yield analysis also indicated that fishing mortality rates much lower than F35% achieved a high percentage of MSY, indicating potential flexibility in specifying reference points. The SSC suggested that some type of collaborative work during the spring, perhaps including SSC members and/or others might facilitate additional progress on this topic. The SSC is interested in developing a wider range of options for reference points for snow crab for consideration in the next assessment cycle.*
+
+This analysis was not extended beyond what was presented last year and would be of limited use until we know more about reproductive contribution of large male snow crab. The specific values for steepness noted by the SSC are arbitrary and do not match observations, estimates, or available data on the reproductive dynamics of snow crab.  Until then, we know that the fishery will not exist without large males and we know that the large males are at historical lows, so we should focus our efforts on understanding the dynamics of large males.
+
+*The SSC again requests an analysis of the probability of maturing/terminal molt which addresses the observation error in these data and the lack of a monotonically increasing curve. A hierarchical analysis that treats years as random effects might be a starting point. The SSC would also like to better understand the sampling design for the molt data and is concerned about the weighting of the spatial samples in the analysis; weighting should be based on abundance if the sampling rate differs by area (which it would, unless abundance were uniform and/or the targets were in direct proportion to abundance).*
+
+The Kodiak lab will give a presentation describing how these data are analyzed. Potential changes to this workflow produces different values for the probability of having undergone terminal molt. Two models runs are included within to explore the impact of different assumptions about the probability of terminal molt. 
+
+*Investigate whether there is information outside the assessment model (e.g., larval or post-settlement data) or in the model, supporting estimated skewed sex-ratios at recruitment and the mismatch between recent large recruitments for males and females occurring in different years. Explore whether the estimated large differences in male and female recruitment years could be related to the lack of fit to molt-increment data.*
+
+No new information has come to light on why this might be the case. Previous discussion centered around the possibility that different spatial distributions by sex of small crab could expose them to different environments, which could alter what we perceive as recruitment five years after settlement. While this difference is an interesting scientific question to pursue, solving it will not address the central problem in management: commercially preferred males are at historic lows over the last decade. Removing the females from the model entirely might be a prudent step towards focusing on the most pressing management problem at hand given conflicting trends.
+
+*Geostatistical (e.g. VAST) modeling of trawl survey data including both the NBS and EBS should be prioritized. This could help understand some of the inconsistent recruitment/growth trends observed in recent years as well as prepare for potential changes in stock distribution or productivity under future warming of the Bering Sea. Geostatistical modeling should evaluate alternative error distributions and other model configurations as appropriate.*
+
+The Kodiak lab will present indices for mature females and large males. 
+
+\newpage
+
+# C. GMACS Assessment scenarios
+## Models
+
+Eight assessment variants were considered this year:
+
+ * 24.1: accepted model from last year
+ * 25.1: Same data from 24.1, but updated GMACS model
+ * 25.2: 25.1 + updated catch data from 1990-present provided by ADFG
+ * 25.3: 25.2 + updated growth data from Kodiak lab
+ * 25.3a: 25.3 + reference points calculated on commercial biomass instead of morphometrically mature
+ * 25.4: 25.3 + a single specified molting probability
+ * 25.4a: 25.3 + a single specified molting probability based on alternate analyses by Kodiak
+ * 25.5: 25.4 + a stacked logistic curve for survey selectivity
+
+ 
+A large number of changes in both structure and formatting have occurred since 2023 when the GMACS version used for snow crab was last updated. For example, functionality was extended to include allowing indices for immature crab, the .CTL file and variable naming schemes were rewritten, the implementation of priors was standardized across parameters, and jitter protocols were revised. For an exhaustive list of changes and bug fixes, see the very end of the .TPL file for the most recent GMACS version on the github repo. All of these changes appear to be improvements, but they did result in some changes to the model fits and management advice. The precise reasons for these changes are unclear currently and will likely be difficult to determine. 
+
+In addition to change in GMACS, ADFG analysts provided revised time series for retained and total catches in the directed fishery for snow crab and for other crab fisheries in which snow crab are caught. Since 2017, one year of data at a time were provided from ADFG and then processed and appended to the existing data files for stock assessment. Revisions of the catch data presented here resulted in a number of changes to both the directed fishery data and non-directed fishery data that are input to the assessment (\autoref{catchfits_ts}). For example, the non-directed fishery data was missing a substantial year of catch of snow crab in the Tanner crab fishery in 2015. Discarded males in the directed fishery also were substantially revised (\autoref{catchfits_ts}). Part of the difference is the way that the data were input into GMACS. Historically the data were entered into the .DAT file with the assumed discard mortality already applied and the discard mortality specified in the GMACS .DAT file was set to 1. With the updated data, the raw discard data were entered into the .DAT file with a specified discard mortality of 30%. This will facilitate easier sensitivity analyses to specified discard mortalities in the future. While this change to data input explains much of the systematic scaling upward of the male discard data, there are were also differences earlier in the time series that cannot be explained by this change. The standardization of the catch time series is an outstanding step forward and we appreciate the ADFG team making it happen.
+
+Models 25.4, 25.4a, and 25.5 are directed at SSC comments around maturity and survey selectivity. The SSC expressed concern around how the probability of terminally molting was being input as a yearly vector and the dip in selectivity for medium sizes estimated in recent GMACS models. To explore the impact of inputting yearly ogives for the probability of having undergone terminal molt, it was input as a single ogive for all years, derived from the median probability of terminally molting at size across all years of available data. This process was repeated for a preliminary revised data set of the probability of terminal molt provided by the Kodiak lab. To explore the impact of freely estimating a vector of parameters for selectivity at size informed by priors derived from the BSFRF data, we implemented a more 'stiff' stacked logistic selectivity curve that would not allow the dip at medium sizes. Unfortunately, this also makes it more difficult to place priors on the parameters using the BSFRF data.
+
+The final model presented is identical to 25.3, except commercially preferred males are used as the currency of management in reference point calculations (model 25.3a). This is the author's preferred modeling scenario because it focuses management on large males. The author would also recommend further simplifying this model by removing females, similar to the models presented in the appendices used to explore time-varying mortality. The continued decline of large snow crab males is concerning and focusing efforts on understanding the decline in the portion of the population upon which the fishery depends (and reversing declines, if possible) should be the priority of assessment and management. Both changing the currency of management to large males and removing females from the assessment would serve to focus the assessment and management on large males.
+
+
+## Results
+### Model convergence and comparison 
+Issues with convergence occurred for all models beyond model 25.3 once additional growth data were incorporated (i.e. no Hessians in spite of small gradients and no parameters on bounds). It is not clear why this occurs, but this will hopefully be resolved by September. The total likelihoods across models are only comparable for a subset because of changes in data and likelihood components (\autoref{like_comp_tot}). While the data for 24.1 and 25.1 were identical, the way that likelihoods, penalties, and priors differ in the updated version of GMACS. Model 25.2 cannot be compared to any other model, but models 25.3, 25.3a, 25.4, and 25.5 all have the same data and underlying likelihood structure. Of these models, 25.3(a) fit the data the best, owing primarily to improvements in fits to the index and size composition data (\autoref{like_ind}). Jittering and retrospective analyses will be provided in September.
+
+### Model fits
+Fits to the survey indices of mature biomass were similar among models (\autoref{mmbfits}). Updating the version of GMACS resulted in a downward revision of the 2018 mature female biomass estimate. It also shifted the peak in mature male biomass from 2018 to 2019. Altering the probability of terminally molting and survey selectivity functional form impacted magnitudes in the early portion of the time series for MMB and resulted in the inability of the model to capture the sharp uptick in MMB during 2018-19.
+
+Updating the growth data resulted in changes in estimated molt increments given pre-molt carapace width for both males and females (\autoref{growthfits}). For females, the molt increment at size was systematically lower with updated data compared to historical data. Part of this change comes from the bulk of observations occurring at small pre-molt size, which swamp the signal from the observations occurring at larger sizes. Paring the dataset to be more balanced in the quantity of observations for a given size class might be a useful future exercise. Using a growth model more flexible than a linear model might also be useful. For males, the estimated molt increments were smaller than historical estimates for smaller pre-molt carapace width until approximately 60mm carapace width, when the estimated molt increments began to be larger than historical estimates. 
+
+Fits to the non-directed fishery catches were good for both the original and revised data sets (\autoref{catchfits}). However, in the directed fishery, fits deteriorated somewhat with the updated dataset. Although most of the retained catch data were still fit well, the model was unable to capture several years of discarded data that historically were well fit (e.g. 1990, 1996 and 2019). Given the methodology for producing the discard data from the 1990s for the status quo assessment are unclear, it is not clear if this a bug or a feature of the updated models. 
+
+Only small differences were observed among models in the fits to size composition data for retained catch in the directed fishery, with the most recently occuring fishery (2021) showing the largest differences (\autoref{size_comp_1}). Fits to the total size composition data from the directed fishery were distinctly different once the growth data were updated in the models (\autoref{size_comp_2}). No visually discernible differences among models existed for female discards from the directed fishery (\autoref{size_comp_3}). Fits to the non-directed fishery had some of the largest misfits of all data sources (particularly for male data), but this is unsurprising given a single estimated selectivity curve and changes in fishery behavior over time (\autoref{size_comp_4} & \autoref{size_comp_5}).
+
+Fits to the survey size composition data were broadly similar among models, except for model 25.5 in which the form of survey selectivity was a stacked logistic (\autoref{survcomp_fits_m_imm} - \autoref{survcomp_fits_f_mat2}). Model 25.5 produced pronounced peaks not apparent in the observed data around carapace widths of 115 mm, particularly in the early years of the survey time series (\autoref{survcomp_fits_m_mat}).
+
+### Estimated population processes
+The estimated abundance of the commercially preferred size of male crab (arguably the most important output of the assessment) varied among models (\autoref{obs_101_vs_pred}). The early years during which differences in survey selectivity occurred were particularly different. All models agreed that the abundance in recent years have been the lowest in the time series. The estimates of the most recent era of survey selectivity were fairly similar across models for males, even when the stacked survey selectivity was used (Model 25.5; \autoref{select_prior}). This is interesting given the prior information from BSFRF was not constraining the parameter estimates for the stacked logistic curve. Estimates for females between 25.5 and all other models were more markedly different. 
+
+Estimated fisheries selectivities were similar for all models (\autoref{predselectfish}). Estimated fishing mortality for the directed fishery was highly variable and relative patterns changed among model configurations, particularly as the catch data sets changed (\autoref{predfmort}). In particular, with the introduction of the updated catch data, estimated fishing mortalities from 2015 to present were higher than estimates from previous models and higher than historical estimates within the same model.  This change in relative magnitude of estimated fishing mortality changed the trend from a roughly decreasing trend for historical assessments to an increasing trend for assessment incorporating the updated catch data. Adopting modeling choices like a single molt or stacked selectivity exacerbated this increase.
+
+For all but two models (25.4 and 25.4a), the calculated probability of undergoing terminal molt used to separate crab into immature and mature survey indices were input as data to the assessment (\autoref{predmat}). For the two scenarios where a single ogive was input, the median probability of terminal molt at size over years was used. The revised methodology the Kodiak lab will present resulted in somewhat lower probabilities over the mid-sized crab.
+
+Trends in recruitment were very similar across models, with some variability in scale (\autoref{recruits}). Differences in estimated recruitment in the most recent years were also observed for males. Models in which a single ogive of probability of terminally molting were used had higher relative estimates of the last two years of recruitments compared to other models. 
+
+Base estimates of natural mortality were similar for mature animals of both sexes, but estimates of immature natural mortality were more variable (\autoref{nat_m}). Similarly, the timing and magnitude of the estimated mortality events in 2018 and 2019 differed widely among model configurations, but all models estimated mortality events that removed at least 80% of crab by sex and maturity state at some point during the marine heatwave of 2018-19.
+
+
+### MMB and management quantities
+Estimated MMB time series all had similar trends, but the scales differed by up to ~50% in some years (\autoref{predmmb}). The scale of MMB when only males > 101 mm carapace width were used in the calculation (model 25.3a) was predictably much lower than when morphometrically mature males were used, but the trends were similar. Differences in estimates and currencies of MMB resulted in large differences in the management targets and advice (\autoref{stepchange}). All models that use morphometrically mature male biomass as the currency of management produced target fishing mortality rates that would allow for the removal of all of the largest male crab. Focusing management on the largest male crab by calculating management quantities based on crab larger than 101mm carapace width resulted in lower fishing mortality targets and would have resulted in a federally closed fishery during 2024.
+
+##  Recommendations for GMACS in September
+
+I continue to recommend focusing management for snow crab on the large males because without them, a fishery cannot occur and their recent trajectory is alarming. New growth data and revised catch data represent an improvement in the best available science for snow crab. Consequently, I recommend bringing forward model 25.3 and 25.3a for September. The convergence issues (i.e. small gradients, but no Hessian) will hopefully be solved by then.
+
+More broadly, I suggest that effort should be made to bring the state and federal systems together so that 1) the downward trajectories of crab stocks can be addressed (if possible), 2) we no longer provide conflicting management advice, and 3) increasingly limited resources are used efficiently to provide desired management outcomes. Given struggles with sensible reference points within the assessment, working backwards from past management actions and their outcomes (i.e. TACs determined by the state HCR and the resulting stock trajectories) and attempting to identify reasonable targets for fishing mortality and biomass from there may be a useful alternative to the current management strategy.
+
+
+\newpage
+
+
+```{r,echo=FALSE,warning=FALSE,message=F}
+
+fldrs = c("24_gmacs_sq/","24_gmacs_update/")
+
+tot_likes<-matrix(nrow=9,ncol=length(fldrs))
+rownames(tot_likes)<-seq(1,9)
+for(y in 1:length(fldrs))
+    {
+      tmp<-readLines(paste(fldrs[y],"/Gmacsall.out",sep=''))
+      st<-grep("Likelihoods_by_type",tmp)[1]
+      for(z in 1:9)
+      {
+        if(y==1)
+        {
+        bleh<-unlist(strsplit(tmp[st+z],split=' '))
+        tot_likes[z,y]<-as.numeric(bleh[grep(":",bleh)+1])
+        }
+       if(y>=2)
+       {
+        bleh<-unlist(strsplit(tmp[st+z],split=' '))
+        tot_likes[z,y]<-as.numeric(bleh[2])
+        rownames(tot_likes)[z]<-bleh[1]
+       }
+      }
+}
+
+colnames(tot_likes) = c("24.1 Status quo","24.1 update_gmacs")
+rownames(tot_likes)[1:5]<-c("Catch","Index","Size","SRR","Tag")
+ kable(round(tot_likes[-8,],2),split.cells=c(25,rep(12,5)),justify=c("left",rep("center",5)),caption="\\label{like_comp_tot}Likelihood components by category and model.")
+
+
+```
+
+\newpage
+
+```{r,echo=FALSE,warning=FALSE,message=F}
+
+fldrs = c("24_gmacs_sq/","24_gmacs_update/")
+keep_like_big<-NULL
+for(y in 1:length(fldrs))
+    {
+      tmp<-readLines(paste(fldrs[y],"/Gmacsall.out",sep=''))
+      if(y==1)
+       st<-grep("Raw likelihood",tmp)
+      if(y>1)
+       st<-grep("Raw_likelihood",tmp)
+      keep_like<-NULL
+      for(z in 1:(length(st)-1))
+      {
+        bleh<-unlist(strsplit(tmp[st[z]],split=' '))
+       if(y>1)
+        keep_like<-c(keep_like,round(as.numeric(bleh[3:length(bleh)]),2))
+       if(y==1)
+        keep_like<-c(keep_like,round(as.numeric(bleh[4:length(bleh)]),2))
+      }
+      keep_like_big<-cbind(keep_like_big,keep_like)
+}
+
+colnames(keep_like_big) = c("24.1 Status quo","24.1 update_gmacs")
+rownames(keep_like_big) <- c("Retained","Discard (male)","Discard (female)","Non-directed",
+                            "NMFS 1982-89 (m)","NMFS 1989-present(m)","NMFS 1982-88 (f)","NMFS 1989-present (f)",
+                            "Retained SC","Total SC","Discard SC (f)","Bycatch SC (f)","Bycatch SC (m)",
+                            "NMFS 1982-89 (imm m)","NMFS 1989-present(imm m)","NMFS 1982-88 (imm f)","NMFS 1989-present (imm f)",
+                            "NMFS 1982-89 (mat m)","NMFS 1989-present(mat m)","NMFS 1982-88 (mat f)","NMFS 1989-present (mat f)",
+                            "Growth","")
+ kable(keep_like_big[-nrow(keep_like_big),],split.cells=c(25,rep(12,5)),justify=c("left",rep("center",5)),caption="\\label{like_ind}Individual likelihood components by model.")
+
+
+```
+
+\newpage
+
+
+
+
+
+```{r,echo=FALSE,warning=FALSE,message=F}
+
+
+PlotTab<- data.frame(Model=ScenarioNames,
+                     MMB=rep(0,length(ScenarioNames)),
+                     B35=rep(0,length(ScenarioNames)),
+                     F35=rep(0,length(ScenarioNames)),
+                     FOFL=rep(0,length(ScenarioNames)),
+                     OFL=rep(0,length(ScenarioNames)),
+                     M=rep(0,length(ScenarioNames)),
+                     avg_rec=rep(0,length(ScenarioNames)),
+                     Status=rep(0,length(ScenarioNames)))
+
+
+for(x in 1:length(M))
+{
+   PlotTab$MMB[x]<-M[[x]]$ssb[length(M[[x]]$ssb)]
+   PlotTab$B35[x]<-M[[x]]$spr_bmsy
+   PlotTab$F35[x]<-M[[x]]$sd_fmsy
+   PlotTab$FOFL[x]<-M[[x]]$sd_fofl[1]
+   PlotTab$OFL[x]<-M[[x]]$spr_cofl
+   PlotTab$Status[x]<- PlotTab$MMB[x]/PlotTab$B35[x]
+   PlotTab$M[x]<-round(M[[x]]$M[1,1],2)
+   PlotTab$avg_rec[x]<-round(mean(M[[x]]$recruits[1,]/10000),2)
+}
+
+
+fldrs =  c("24_gmacs_update/")
+take_row<-c(1,2,3,4,8,12,13)
+keep_out<-matrix(nrow=length(fldrs),ncol=length(take_row))
+colnames(keep_out)<-seq(1,ncol(keep_out))
+for(y in 1:length(fldrs))
+    {
+      tmp<-readLines(paste(fldrs[y],"/Gmacsall.out",sep=''))
+      st<-grep("BMSY",tmp)[1]
+      end<-grep("Ofl",tmp)[length(grep("Ofl",tmp))]
+      use<-tmp[st:end]
+for(x in 1:length(take_row))
+ {
+  if(x<4)
+   keep_out[y,x]<-as.numeric(strsplit(use[take_row[x]],split=" ")[[1]][3])
+    if(x>=4)
+   keep_out[y,x]<-as.numeric(strsplit(use[take_row[x]],split=" ")[[1]][4])
+  colnames(keep_out)[x]<-strsplit(use[take_row[x]],split=" ")[[1]][1]
+}
+}
+sq_tk<-PlotTab[,c(3,9,6,4,5)]
+colnames(sq_tk)<-colnames(keep_out[,c(1:5)])
+man_tab<-rbind(sq_tk,keep_out[,c(1:5)])
+man_tab<-round(man_tab,2)
+colnames(man_tab)<-names(keep_out[,c(1:5)])
+rownames(man_tab) = c("24.1 Status quo","24.1 update_gmacs")
+
+ kable(man_tab,split.cells=c(25,rep(12,5)),justify=c("left",rep("center",5)),caption="\\label{stepchange}Management quantities derived from maximum likelihood estimates by model using Tier 3 reference points. Reported natural mortality is for mature males, average recruitment is for males, and status and MMB were estimates for February 15 of the completed crab year.")
+
+
+```
+
+\newpage
+
+
+\newpage
+
+```{r,echo=FALSE,warning=FALSE,message=F,fig.width=8,fig.height=8,fig.cap="\\label{catchfits_ts}Model fits to catch data."}
+
+   mdf <- .get_catch_df(M)
+   mdf$type<-as.character(mdf$type)
+   dfrCatFit = wtsGMACS::extractRep1Results(reslst,"Catch_fit_summary") |> 
+              dplyr::mutate(
+                dplyr::across(c(year,obs,cv,effort,HM,prd,rsd),
+                              as.numeric)
+              );
+
+   
+colnames(dfrCatFit)[c(13,14,15)]<-c('predicted','residuals','model')
+common<-intersect(colnames(mdf),colnames(dfrCatFit))
+plot_dat<-rbind(mdf[,match(common,colnames(mdf))],dfrCatFit[,match(common,colnames(dfrCatFit))])
+
+##--catch data----
+input<-filter(plot_dat,model%in%c("24.1 status quo","24.1 update_gmacs"))
+levels(input$sex)[1]<-"Non-directed bycatch"
+  p = ggplot(input,aes(x=year,colour=model)) + 
+        geom_point(aes(y=obs)) + 
+        geom_line(aes(y=obs)) + 
+        scale_y_continuous(limits=c(0,NA)) + 
+        labs(y="Catch (1,000's t)") + 
+        facet_wrap(sex~type,ncol=1,scales="free_y")  +theme_bw()
+
+print(p)
+
+```
+
+
+\newpage
+
+
+```{r,echo=FALSE,warning=FALSE,message=F,fig.width=8.5,fig.height=8,fig.cap="\\label{mmbfits}Model fits to the observed mature biomass at survey."}
+
+
+##--index catch data----
+dfrIndxFit = wtsGMACS::extractRep1Results(reslst,"Index_fit_summary") |> 
+               dplyr::mutate(
+                dplyr::across(c(year,obs,base_CV,actual_CV,q,prd,prsn_res),
+                              as.numeric)
+               ) |> 
+               dplyr::mutate(lba=qlnorm(0.05,log(obs),sqrt(log(1+actual_CV^2))),
+                             uba=qlnorm(0.05,log(obs),sqrt(log(1+actual_CV^2)),lower.tail=FALSE));
+
+  p = ggplot(dfrIndxFit) + 
+        geom_errorbar(aes(x=year,ymin = lba, ymax = uba), width = 0.2) + # Add error bars
+        #geom_ribbon(aes(ymin=lba,ymax=uba,group=case),alpha=0.2,colour=NA) + 
+      #  geom_ribbon(aes(ymin=lbo,ymax=ubo,group=case),fill="green",alpha=0.3,colour=NA) + 
+        geom_point(aes(x=year,y=obs)) + 
+        geom_line(aes(x=year,colour=case,fill=case,y=prd)) + 
+        facet_wrap(sex~fleet,ncol=1,scales="free_y") + 
+        labs(y="NMFS Survey Biomass (1,000's t)") + theme(legend.position=c(.7,.9))+
+        wtsPlots::getStdTheme();
+
+    mdf <- .get_cpue_df(M)
+    mdf<-filter(mdf,fleet=="NMFS_Trawl_1982"|fleet=="NMFS_Trawl_1989")
+
+colnames(dfrIndxFit)[c(13,14,15)]<-c('predicted','residuals','model')
+colnames(mdf)[c(17,18,1,8)]<-c('predicted','residuals','model','obs')
+common<-intersect(colnames(mdf),colnames(dfrIndxFit))
+plot_dat<-rbind(mdf[,match(common,colnames(mdf))],dfrIndxFit[,match(common,colnames(dfrIndxFit))])
+
+##--catch data----
+
+  p = ggplot(plot_dat,aes(x=year,colour=model)) + 
+        geom_point(aes(y=obs),col='black') + 
+        geom_line(aes(y=predicted),lwd=1.1) + 
+        geom_errorbar(data=mdf,aes(x=year,ymin = lbe, ymax = ube), width = 0.2,col='black') +
+        scale_y_continuous(limits=c(0,NA)) + 
+        labs(y="Catch (1,000's t)") + 
+        facet_wrap(~sex,ncol=1,scales="free_y")  +theme_bw()
+
+print(p)
+
+```
+
+\newpage
+
+
+
+\newpage
+
+```{r,echo=FALSE,warning=FALSE,message=F,fig.width=8,fig.height=6,fig.cap="\\label{growthfits}Model fits (colored lines) to the growth data (dots). Black dots are historical observations; red dots are new data for 2025."}
+
+
+ dfrMnGr = wtsGMACS::extractRep1Results(reslst,"Mean growth") |> 
+              dplyr::mutate(dplyr::across(3:5,as.numeric));
+
+  new_dat<-read.csv("data/grow_dat.csv")
+  new_dat$Sex[new_dat$Sex==1]<-"Male"
+  new_dat$Sex[new_dat$Sex==2]<-"Female"
+  colnames(dfrMnGr)[1]<-"Sex"   
+  dfrMnGr$Sex[dfrMnGr$Sex=="male"]<-"Male"
+  dfrMnGr$Sex[dfrMnGr$Sex=="female"]<-"Female"
+
+   mdf <- .get_gi_df(M)
+    obs_in<-dplyr::filter(mdf,type=="obs")
+    pred_in<-dplyr::filter(mdf,type=="pred")
+  pred_in$Sex<-recode_factor(pred_in$Sex,'1'="Male",'2'="Female")
+  obs_in$Sex<-recode_factor(obs_in$Sex,'1'="Male",'2'="Female")
+  pred_in<-pred_in[-which(pred_in$Sex=="Female"&pred_in$Premolt>60),]
+    p <- ggplot() +
+        expand_limits(y=0) +
+        geom_line(data=pred_in,aes(x=Premolt,y=molt_inc,col=Model),lwd=1.15,alpha=.8) +
+        .THEME+ 
+      geom_point(data=new_dat,aes(x=Premolt,y=Molt.Inc),col='red')+
+      geom_point(data=obs_in,aes(x=Premolt,y=molt_inc))+
+      ylab("Molt increment (mm)")+
+      xlab("Pre-molt carapace width (mm)")+
+      theme(legend.position=c(.8,.8)) + 
+      geom_line(data=filter(dfrMnGr,block==1&Sex=="Male"),aes(x=premolt_size,y=mean_increment,colour=case,group=case))  +
+      geom_line(data=filter(dfrMnGr,block==1&Sex=="Female"&premolt_size<60),aes(x=premolt_size,y=mean_increment,colour=case,group=case))  +
+      facet_wrap(~Sex,scales='free_x') +theme_bw()
+print(p)
+
+```
+
+
+
+\newpage
+
+```{r,echo=FALSE,warning=FALSE,message=F,fig.width=8,fig.height=8,fig.cap="\\label{catchfits}Model fits to catch data."}
+
+   mdf <- .get_catch_df(M)
+   mdf$type<-as.character(mdf$type)
+
+   dfrCatFit = wtsGMACS::extractRep1Results(reslst,"Catch_fit_summary") |> 
+              dplyr::mutate(
+                dplyr::across(c(year,obs,cv,effort,HM,prd,rsd),
+                              as.numeric)
+              );
+
+   
+colnames(dfrCatFit)[c(13,14,15)]<-c('predicted','residuals','model')
+common<-intersect(colnames(mdf),colnames(dfrCatFit))
+plot_dat<-rbind(mdf[,match(common,colnames(mdf))],dfrCatFit[,match(common,colnames(dfrCatFit))])
+
+##--catch data----
+levels(plot_dat$sex)[1]<-"Non-directed bycatch"
+
+  p = ggplot(plot_dat,aes(x=year,colour=model)) + 
+        geom_point(aes(y=obs)) + 
+        geom_line(aes(y=predicted)) + 
+        scale_y_continuous(limits=c(0,NA)) + 
+        labs(y="Catch (1,000's t)") + 
+        facet_wrap(sex~type,ncol=1,scales="free_y")  +theme_bw()
+
+print(p)
+
+```
+
+\newpage
+
+
+
+```{r,echo=FALSE,warning=FALSE,message=F,out.width="100%",fig.cap="\\label{size_comp_1}Model fits (lines) to the retained catch size composition data (grey bars)."}
+
+include_graphics("plots/size_comp_1.png")
+
+
+```
+
+\newpage
+
+```{r,echo=FALSE,warning=FALSE,message=F,out.width="100%",fig.cap="\\label{size_comp_2}Model fits (lines) to the total catch size composition data (grey bars)."}
+
+include_graphics("plots/size_comp_2.png")
+
+
+```
+
+\newpage
+
+```{r,echo=FALSE,warning=FALSE,message=F,out.width="100%",fig.cap="\\label{size_comp_3}Model fits (lines) to the female discard size composition data (grey bars)."}
+
+include_graphics("plots/size_comp_3.png")
+
+```
+
+\newpage
+
+```{r,echo=FALSE,warning=FALSE,message=F,out.width="100%",fig.cap="\\label{size_comp_4}Model fits (lines) to the male non-directed fishery size composition data (grey bars)."}
+
+include_graphics("plots/size_comp_4.png")
+
+```
+
+\newpage
+
+
+```{r,echo=FALSE,warning=FALSE,message=F,out.width="100%",fig.cap="\\label{size_comp_5}Model fits (lines) to the female non-directed size composition data (grey bars)."}
+
+include_graphics("plots/size_comp_5.png")
+
+
+```
+
+\newpage
+
+
+```{r,echo=FALSE,warning=FALSE,message=F,out.width="100%",fig.cap="\\label{survcomp_fits_m_imm}Model fits to immature male survey size composition data from 1982-1988."}
+
+include_graphics("plots/size_comp_6.png")
+```
+
+
+\newpage
+
+```{r,echo=FALSE,warning=FALSE,message=F,out.width="100%",fig.cap="\\label{survcomp_fits_f_imm}Model fits to immature female survey size composition data from 1982-1988."}
+
+include_graphics("plots/size_comp_8.png")
+```
+
+
+\newpage
+
+```{r,echo=FALSE,warning=FALSE,message=F,out.width="100%",fig.cap="\\label{survcomp_fits_m_mat}Model fits to mature male survey size composition data from 1982-1988."}
+include_graphics("plots/size_comp_7.png")
+```
+
+\newpage
+
+
+
+```{r,echo=FALSE,warning=FALSE,message=F,out.width="100%",fig.cap="\\label{survcomp_fits_f_mat}Model fits to mature female survey size composition data from 1982-1988."}
+include_graphics("plots/size_comp_9.png")
+            
+```
+
+\newpage
+
+```{r,echo=FALSE,warning=FALSE,message=F,out.width="100%",fig.cap="\\label{survcomp_fits_m_imm2}Model fits to immature male survey size composition data from 1989-present."}
+
+include_graphics("plots/size_comp_10.png")
+```
+
+
+\newpage
+
+```{r,echo=FALSE,warning=FALSE,message=F,out.width="100%",fig.cap="\\label{survcomp_fits_f_imm2}Model fits to immature female survey size composition data from 1989-present."}
+
+include_graphics("plots/size_comp_12.png")
+```
+
+
+\newpage
+
+```{r,echo=FALSE,warning=FALSE,message=F,out.width="100%",fig.cap="\\label{survcomp_fits_m_mat2}Model fits to mature male survey size composition data from 1989-present."}
+include_graphics("plots/size_comp_11.png")
+```
+
+\newpage
+
+
+
+```{r,echo=FALSE,warning=FALSE,message=F,out.width="100%",fig.cap="\\label{survcomp_fits_f_mat2}Model fits to mature female survey size composition data from 1989-present."}
+include_graphics("plots/size_comp_13.png")
+            
+```
+
+
+
+
+\newpage
+
+
+```{r,echo=FALSE,warning=FALSE,message=F,out.width="100%",fig.cap="\\label{obs_101_vs_pred}Estimated biomass of male crab >101mm carapace width from the survey (black line and dots with gray 95th CI) and from each model in the assessment (colored lines)."}
+EBSdata	<-read.csv("data/EBSCrab_AB_Sizegroup.csv")
+#==make upper and lower CIs
+EBSdata$upper_bio_ci<-exp(log(EBSdata$BIOMASS_MT)+1.96*(sqrt(log(1+EBSdata$BIOMASS_MT_CV^2))))
+EBSdata$lower_bio_ci<-exp(log(EBSdata$BIOMASS_MT)-1.96*(sqrt(log(1+EBSdata$BIOMASS_MT_CV^2))))
+  
+pred_101<-NULL
+for(i in 1:length(M))
+{
+  big_bio<-(M[[i]]$N_males*M[[i]]$mean_wt[1:(length(M[[i]]$mod_yrs)+1),])[,16:22]
+  big_bio[,1]<-big_bio[,1]*(3/5) #take 3/5 of the biomass to represent >101 mm
+  bio_101<-apply(big_bio,1,sum,na.rm=T)
+  indf<-data.frame(biomass=c(bio_101),
+                   SURVEY_YEAR=c(M[[i]]$mod_yrs,M[[i]]$mod_yrs[length(M[[i]]$mod_yrs)]+1),
+                   model=mod_names[i])
+  pred_101<-rbind(pred_101,indf)
+}
+
+
+EBSdata$upper_abn_ci<-exp(log(EBSdata$ABUNDANCE)+1.96*(sqrt(log(1+EBSdata$ABUNDANCE_CV^2))))
+EBSdata$lower_abn_ci<-exp(log(EBSdata$ABUNDANCE)-1.96*(sqrt(log(1+EBSdata$ABUNDANCE_CV^2))))
+  
+pred_101_N<-NULL
+for(i in 1:length(M))
+{
+  big_bio<-(M[[i]]$N_males)[,16:22]
+  big_bio[,1]<-big_bio[,1]*(3/5) #take 3/5 of the biomass to represent >101 mm
+  bio_101<-apply(big_bio,1,sum,na.rm=T)
+  indf<-data.frame(ABN=c(bio_101),
+                   SURVEY_YEAR=c(M[[i]]$mod_yrs,M[[i]]$mod_yrs[length(M[[i]]$mod_yrs)]+1),
+                   model=mod_names[i])
+  pred_101_N<-rbind(pred_101_N,indf)
+}
+
+
+
+dfrN_YXMSZ = wtsGMACS::extractRep1Results(reslst,"N_YXMSZ") |> 
+                tidyr::pivot_longer(cols=!c(case,year,sex,maturity,shell_con),
+                                    names_to="size",
+                                    values_to="est") |> 
+                dplyr::mutate(dplyr::across(c(year,size,est),
+                                            as.numeric),
+                              xm=paste(maturity,sex)
+                             );
+
+#names(reslst$outsLst$'25.1: update_gmacs')
+#reslst$outsLst$'25.1: update_gmacs'$Weight
+pred_101_n2<-filter(dfrN_YXMSZ,sex=='male'&size>101)%>%
+  group_by(year,case)%>%
+  summarize(ABN=sum(est))
+
+pred_101_n3<-filter(dfrN_YXMSZ,sex=='male'&size==97.5)%>%
+  group_by(year,case)%>%
+  summarize(ABN=3/5*sum(est))
+
+pred_101_n2$tot_ABN<-(pred_101_n2$ABN+pred_101_n3$ABN)
+
+
+
+male_101<-filter(EBSdata,SIZE_GROUP=="MALE_GE102")
+div_n<-1000
+large_males<-ggplot()+
+  geom_ribbon(data=male_101,aes(x=SURVEY_YEAR,ymin=lower_abn_ci/div_n,ymax=upper_abn_ci /div_n),fill='light grey')+
+  geom_line(data=male_101,aes(x=SURVEY_YEAR,y=ABUNDANCE/div_n))+
+  geom_point(data=male_101,aes(x=SURVEY_YEAR,y=ABUNDANCE/div_n))+
+  geom_line(data=pred_101_N,aes(x=SURVEY_YEAR,y=ABN,color=model),lwd=1.1,alpha=0.6)+
+    geom_line(data=pred_101_n2,aes(x=year,y=tot_ABN,color=case),lwd=1.1,alpha=0.6)+
+  theme_bw()+
+  theme(legend.position='bottom')+
+  expand_limits(y=0)+
+  xlab("")+
+  scale_y_continuous(name="Abundance (1,0000,000s)",position='left',limits=c(0,650000))+
+  xlim(1982,2024)
+
+print(large_males)
+
+# male_101$ABUNDANCE/max(male_101$ABUNDANCE)
+# male_101$ABUNDANCE/mean(male_101$ABUNDANCE)
+
+
+```
+
+
+
+\newpage
+
+```{r,echo=FALSE,warning=FALSE,message=F,fig.height=10,fig.width=7,fig.cap="\\label{select_prior}Estimated survey selectivity (lines) with normal priors derived from BSFRF selectivity experiment data. Points are the mean of the prior at a given size; intervals are 95th quantiles based on input CVs. Model 25.5 not estimated with priors."}
+
+
+ #--selectivity----
+  zBs = wtsGMACS::extractRep1Results(reslst,"size_midpoints")[[1]];
+  nZBs = length(zBs);
+  dfrSel = wtsGMACS::extractRep1Results(reslst,"selfcns") |> 
+             dplyr::filter(type=="capture",
+                           fleet %in% c("NMFS_Trawl_1982 ","NMFS_Trawl_1989")) |>
+             tidyr::pivot_longer(cols=4+(1:nZBs),names_to="size",values_to="est") |>
+             dplyr::mutate(dplyr::across(c(2,6,7),as.numeric)); 
+ 
+  mdf <- .get_selectivity_df(M)
+  mdf <- mdf[!mdf$sex%in%"Aggregate",]
+  ncol <-length(unique(mdf$fleet))
+  nrow <-length(unique(mdf$Model))
+  nrow_sex <-length(unique(mdf$sex))
+
+sel_prior<-data.frame(mu=M[[1]]$slx_control_in[7:28,9],
+                      upper=M[[1]]$slx_control_in[7:28,9]+1.96*M[[1]]$slx_control_in[7:28,10],
+                      lower=M[[1]]$slx_control_in[7:28,9]-1.96*M[[1]]$slx_control_in[7:28,10],
+                      size=M[[1]]$mid_points)
+
+ colnames(dfrSel)[c(5,7)]<-c("model","probability")
+ colnames(mdf)[c(1,6,7)]<-c("model","size","probability")
+
+ plot_dat<-rbind(mdf,dfrSel[,c(5,1,2,3,4,6,7)])
+ plot_dat$type[plot_dat$type=="capture"]<-"Capture"
+use_sel<-filter(plot_dat,type%in%c('capture','Capture')&fleet=="NMFS_Trawl_1989")
+      p <- ggplot() + expand_limits(y = c(0,1))+
+      geom_line(data=use_sel,aes(x=size,y=probability,col=model,linetype=type),lwd=1.1)+
+      geom_pointrange(data=sel_prior,aes(x=size, y=mu, ymax = upper, ymin = lower), col = "black")+
+      facet_wrap(~fleet+sex,ncol=1)+theme_bw()+
+      xlab("Carapace width (mm)")+
+      ylab("Selectivity")+theme(legend.position='bottom')
+ 
+
+ print(p)     
+      
+      
+      
+
+```
+
+
+
+\newpage
+
+```{r,echo=FALSE,warning=FALSE,message=F,fig.height=8,fig.width=8,fig.cap="\\label{predselectfish}Estimated selectivities by fishing fleet and sex for capture and retained catches. "}
+
+zBs = wtsGMACS::extractRep1Results(reslst,"size_midpoints")[[1]];
+nZBs = length(zBs);
+dfrSel = wtsGMACS::extractRep1Results(reslst,"selfcns") |> 
+           dplyr::filter(type!="discard",
+                         fleet %in% c("Pot_Fishery","Trawl_Bycatch")) |>
+           tidyr::pivot_longer(cols=4+(1:nZBs),names_to="size",values_to="est") |>
+           dplyr::mutate(dplyr::across(c(2,6,7),as.numeric)); 
+
+
+ # fix for catchability
+  mdf <- .get_selectivity_df(M)
+  mdf <- mdf[!mdf$sex%in%"Aggregate",]
+  ncol <-length(unique(mdf$fleet))
+  nrow <-length(unique(mdf$Model))
+  nrow_sex <-length(unique(mdf$sex))
+
+ colnames(dfrSel)[c(5,7)]<-c("model","probability")
+ colnames(mdf)[c(1,6,7)]<-c("model","size","probability")
+
+ plot_dat<-rbind(mdf,dfrSel[,c(5,1,2,3,4,6,7)])
+ plot_dat$type[plot_dat$type=="capture"]<-"Capture"
+  
+  fish_mdf<-filter(plot_dat,fleet%in%c("Pot_Fishery","Trawl_Bycatch"))
+  #filter(fish_mdf,fleet=='Pot_Fishery',sex=="Male",year==1982)
+  levels(fish_mdf$fleet)[2]<-"Non-directed bycatch"
+  
+    p <- ggplot(fish_mdf) + expand_limits(y = c(0,1))+
+      geom_line(aes(x=size,y=probability,col=model,linetype=type),lwd=1.15,alpha=.75)+
+      facet_wrap(~fleet+sex)+theme_bw()+theme(legend.position='bottom')
+ 
+     print(p)
+
+     #  #==show realized F
+     # tmp<-filter(fish_mdf,fleet=='Pot_Fishery',sex=="Male",year==1982)
+     # real_sel<-filter(tmp,type=="Retained"&Model=="23.3a")$value*filter(tmp,type=="Capture"&Model=="23.3a")$value
+     # cbind(real_sel,seq(27.5,132.5,5))
+     # png("plots/realized_sel.png")
+     # plot(real_sel~seq(27.5,132.5,5),type='b',las=1,ylab="Realized selectivity",xlab="Carapace width (mm)")
+     # abline(v=101,lty=2)
+     # dev.off()
+    #==check exploitation rate on 102.5mm males
+    # temp<-filter(fish_mdf,fleet=='Pot_Fishery',sex=="Male",year==1982,variable==102.5,Model=='23.3a')
+    # exp(-temp$value[1]*temp$value[2]*M[[chosen_ind]]$sd_fmsy[1])
+         # exp(-temp$value[1]*temp$value[2]*M[[chosen_ind]]$sd_fofl[1])
+```
+
+\newpage
+
+```{r,echo=FALSE,warning=FALSE,message=F,fig.height=10,fig.width=8,fig.cap="\\label{predfmort}Estimated fishing mortalities for the directed and non-directed fisheries."}
+
+    n <- length(M)
+    fdf <- NULL
+    fbar <- NULL
+    for ( i in 1:n )
+    {
+        A <- M[[i]]
+        nyear <- length(A$mod_yrs)
+        nseas <- nseason <- A$nseason
+        nclass <- length(A$mid_points)
+        nfleet <- A$nfleet
+        df <- data.frame(A$ft, Model = names(M)[i])
+        colnames(df) <- c(1:nseason, "model")
+        df$year <- rep(A$mod_yrs, by = nfleet)
+        # df$fleet <- rep(.FLEET, each = nyear*A$nsex)
+        if(i>1)df$fleet <- rep(.All_FLEET[1:4], each = nyear*A$nsex)
+        if(i==1)df$fleet <- rep(.All_FLEET, each = nyear*A$nsex)
+        df$sex <- rep("Sex",nrow(df))
+        if(A$nsex==2)
+          df$sex <- rep(rep(c("Male","Female"),each = nyear),nfleet)
+        del <- NULL
+        for ( j in 1:nseason )
+        {
+            if (all(df[,j] == 0))
+            {
+                del <- c(del, j)
+                nseas <- nseas - 1
+            }
+        }
+        df <- df[,-del]
+        df <- tidyr::gather(df, "season", "F", 1:nseas)
+        for ( j in unique(df$model) )
+        {
+            for ( k in unique(df$season) )
+            {
+                for ( l in unique(df$fleet) )
+                {
+                    if (all(df[df$model %in% j & df$season %in% k & df$fleet %in% l,]$F == 0)) df <- df[-which(df$model %in% j & df$season %in% k & df$fleet %in% l),]
+                }
+            }
+        }
+        fdf <- rbind(fdf, df)
+
+        df <- data.frame(Model = names(M)[i], fbar = exp(A$log_fbar))
+        if(i>1)df$fleet <- .FLEET[1:4]
+        if(i==1)df$fleet <- .All_FLEET
+        df <- df[which(df$fleet %in% unique(fdf$fleet)),]
+        fbar <- rbind(fbar, df)
+    }
+    fdf$year <- as.integer(fdf$year)
+   
+#1-(exp(-mean(filter(fdf,model=="Focused"&sex=="Male"&fleet == "Pot_Fishery")$F)))
+#filter(infdf,model=="Status quo 2023"&sex=="Male"&fleet == "Pot_Fishery")
+
+    dfrFMbyXFY = wtsGMACS::extractRep1Results(reslst,"Fully-selected_FM_by_season_sex_and_fishery") |> 
+              tidyr::pivot_longer(cols=!c("case","sex","fleet","year"),
+                                  names_to="season",
+                                  values_to="est") |> 
+              dplyr::mutate(
+                dplyr::across(c(year,est),as.numeric)
+              ) |> 
+              dplyr::group_by(case,fleet,season) |> 
+              dplyr::filter(sum(est)>0) |> 
+              dplyr::ungroup();
+crbFshs = c("Pot_Fishery","Trawl_Bycatch")
+    
+ colnames(dfrFMbyXFY)[c(4,6)]<-c("model","F")
+    dfrFMbyXFY$sex[dfrFMbyXFY$sex=="male"]<-"Male"
+  dfrFMbyXFY$sex[dfrFMbyXFY$sex=="female"]<-"Female"
+ 
+ plot_dat<-rbind(fdf,dfrFMbyXFY[,c(4,3,2,1,5,6)])
+     levels(plot_dat$fleet)[2]<-"Non-directed bycatch"
+ggplot(data = plot_dat) + 
+   geom_line(aes(x=year, y=F,col=model,group=model),lwd=1.25,alpha=.6)+ 
+   facet_grid(fleet ~ season + sex,scale='free_y') + 
+   theme_bw()+
+   theme(legend.position=c(.2,.8))
+
+```
+
+
+\newpage
+
+```{r,echo=FALSE,warning=FALSE,message=F,fig.height=10,fig.width=8,fig.cap="\\label{predmat}Estimated (black line) or specified (colored lines) probability(s) of maturing for male crab."}
+
+   mdf <- .get_molt_prob_df(M)
+   just_sq<-filter(mdf,Year==1982&Sex=='male')
+   
+
+   
+   dumm<-filter(mdf,Sex=="male")
+   p <- ggplot() +
+        expand_limits(y = c(0, 1)) +
+        labs(x = "Carapace width (mm)", y ="Probability of terminal molt")+ 
+     geom_line(data=dumm, aes(x = Length, y = MP,linetype = Model, col = Year),lwd=1.15,alpha=.8) + 
+     geom_line(data=just_sq,aes(x=Length,y=MP),col=1,lwd=1.5)+guides(linetype='none')+
+     theme_bw()+theme(legend.position='bottom')
+
+
+    print(p)
+    
+    
+    
+   #  tmpt<-read.csv("data/snow_unweighted_propmature.csv")
+   #  med_no_wt<-filter(tmpt,BIN_SIZE=='10mm')%>%
+   #    group_by(MIDPOINT)%>%
+   #    summarize(med_prop=median(PROP_MATURE))
+   # 
+   #   ggplot()+
+   #   geom_line(data=just_sq,aes(x=Length,y=MP),col=1,lwd=1.5)+guides(linetype='none')+
+   #   geom_line(data=med_no_wt,aes(x=MIDPOINT,y=med_prop),col=2,lwd=1.5)+guides(linetype='none')+
+   #     theme_bw()
+   #  
+   #  trrmm<- ggplot(filter(tmpt,BIN_SIZE=="10mm"))+
+   #    geom_line(aes(x=MIDPOINT,y=PROP_MATURE,group=YEAR,col=as.factor(YEAR)),lwd=1.5)+
+   #    theme_bw()+xlim(25,140) +    geom_line(data=just_sq,aes(x=Length,y=MP),col=1,lwd=1.5)+guides(linetype='none')
+   # 
+   # p+trrmm
+
+```
+
+\newpage
+
+
+```{r,echo=FALSE,warning=FALSE,message=F,fig.height=10,fig.width=8,fig.cap="\\label{recruits}Estimated recruitment by sex (bottom) and proportions recruiting to length bin (top) by model."}
+
+
+  dfr_m = wtsGMACS::extractRep1Results(reslst,"Summary") |> 
+          dplyr::select(case,year,rec_male)
+  dfr_f = wtsGMACS::extractRep1Results(reslst,"Summary") |> 
+          dplyr::select(case,year,rec_female) 
+  ##----plot time series----
+  # p = ggplot(dfr,mapping=aes(x=year,y=est,ymin=lb,ymax=ub,colour=case,fill=case)) +
+  #     geom_line() + 
+  #     geom_ribbon() + 
+  #     geom_hline(yintercept=0) + 
+  #     labs(x="year",y="estimated male recruitment (millions)") + 
+  #     wtsPlots::getStdTheme();
+
+recs_df<-NULL
+for(i in 1:length(M))
+{
+  indf<-data.frame(Recruits=c(M[[i]]$recruits[1,],M[[i]]$recruits[2,]),
+                   sex=c(rep("Male",ncol(M[[i]]$recruits)),rep("Female",ncol(M[[i]]$recruits))),
+                   Year=c(M[[i]]$mod_yrs,M[[i]]$mod_yrs),
+                   model=mod_names[i])
+  recs_df<-rbind(recs_df,indf)
+}
+dfr_m$sex<-"Male"
+colnames(dfr_m)<-c("model","Year","Recruits","sex")
+dfr_f$sex<-"Female"
+colnames(dfr_f)<-c("model","Year","Recruits","sex")
+
+plot_dat<-rbind(recs_df,dfr_f[,c(3,4,2,1)],dfr_m[,c(3,4,2,1)])
+
+plot_dat$Recruits<-as.numeric(plot_dat$Recruits)
+plot_dat$Year<-as.numeric(plot_dat$Year)
+ggplot(plot_dat)+
+  geom_line(aes(x=Year,y=Recruits,col=model),lwd=1.15)+
+  theme_bw()+facet_wrap(~sex,ncol=1,scales='free_y')
+ 
+
+``` 
+
+
+\newpage
+
+```{r,echo=FALSE,warning=FALSE,message=F,fig.height=10,fig.width=8,fig.cap="\\label{recruit_fit}Estimated recruitment by sex (bottom) and proportions recruiting to length bin (top) by model."}
+
+# 
+#   dfr_m = wtsGMACS::extractRep1Results(reslst,"Summary") |> 
+#           dplyr::select(case,year,rec_male)
+#   dfr = wtsGMACS::extractRep1Results(reslst,"Summary") |> 
+#           dplyr::select(case,year,SSB)
+#   dfr$year<-as.numeric(dfr$year)+5
+#   
+#   usedat<-merge(dfr,dfr_m)
+#   
+#   
+#   ggplot()+
+#   geom_point(data=usedat,aes(x=as.numeric(SSB),y=as.numeric(rec_male),col=case))+
+#   facet_wrap(~case,scales='free')+theme_bw()+
+#   expand_limits(y=0,x=0)+
+#   theme(legend.position=c(.85,.15))
+#   
+#  in_dat<-filter(usedat,case=="24.1 update_gmacs")
+#  
+#    ggplot()+
+#   geom_point(data=in_dat,aes(x=as.numeric(SSB),y=as.numeric(rec_male),col=case))+
+#   facet_wrap(~case,scales='free')+theme_bw()+
+#   expand_limits(y=0,x=0)+
+#   theme(legend.position=c(.85,.15))
+#  
+ # library(mgcv) 
+ # mod_rick<-gam(data=in_dat,as.numeric(rec_male)~s(as.numeric(SSB)))
+ # mod_base<-gam(data=in_dat,as.numeric(rec_male)~1) 
+ # 
+ # mod_lm<-lm(data=in_dat,log(as.numeric(rec_male)/(as.numeric(SSB)))~as.numeric(SSB))
+ # mod_lm_b<-lm(data=in_dat,log(as.numeric(rec_male)/(as.numeric(SSB)))~1)
+ # 
+ # AIC(mod_lm)
+ # AIC(mod_lm_b)
+ # 
+ # in_ssb<-seq(0,max(as.numeric(in_dat$SSB)))
+ # preds<-(as.numeric(in_dat$SSB))*exp(predict(mod_lm_b,SSB=in_ssb))
+ # plot(as.numeric(in_dat$rec_male)~(as.numeric(in_dat$SSB)),xlim=c(0,max(as.numeric(in_dat$SSB))))
+ # 
+ # plot(mod_rick)
+ # summary(mod_rick)
+ # summary(mod_base)
+ # AIC(mod_rick)
+ # AIC(mod_base)
+ 
+```
+
+
+\newpage
+
+```{r,echo=FALSE,warning=FALSE,message=F,fig.height=10,fig.width=8,fig.cap="\\label{recruit_fit}Estimated recruitment by sex (bottom) and proportions recruiting to length bin (top) by model."}
+
+
+#   dfr_m = wtsGMACS::extractRep1Results(reslst,"Summary") |> 
+#           dplyr::select(case,year,rec_male)
+# 
+# 
+#   
+#   
+# recs_df<-NULL
+# for(i in 1:length(M))
+# {
+#   indf<-data.frame(Recruits=c(M[[i]]$recruits[1,]),
+#                    sex=c(rep("Male",ncol(M[[i]]$recruits))),
+#                    Year=c(M[[i]]$mod_yrs-5),
+#                    model=mod_names[i])
+#   recs_df<-rbind(recs_df,indf)
+# }
+# dfr_m$sex<-"Male"
+# colnames(dfr_m)<-c("model","Year","Recruits","sex")
+# 
+# 
+# plot_dat<-rbind(recs_df,dfr_m[,c(3,4,2,1)])
+#  dfr = wtsGMACS::extractRep1Results(reslst,"Summary") |> 
+#           dplyr::select(case,year,SSB)
+# ssb_df<-NULL
+# for(i in 1:length(M))
+# {
+#   indf<-data.frame(SSB=M[[i]]$ssb,
+#                    Year=M[[i]]$mod_yrs,
+#                    model=mod_names[i])
+#   ssb_df<-rbind(ssb_df,indf)
+# }
+# 
+# colnames(dfr)[c(1:2)]<-c("model","Year")
+# 
+# plot_dat2<-rbind(ssb_df,dfr[,c(3,2,1)])
+# plot_dat2$SSB<-as.numeric(plot_dat2$SSB)
+# plot_dat2$year<-as.numeric(plot_dat2$Year)
+# 
+# plot_dat3<-merge(plot_dat2,plot_dat)
+# 
+# 
+# 
+# plot_dat3 %>% 
+#   group_by(model)%>%
+#   dplyr::summarize(cor.test(SSB, as.numeric(Recruits))[['statistic']])
+# 
+# plot_dat3 %>% 
+#   group_by(model)%>%
+#   dplyr::summarize(cor.test(SSB, as.numeric(Recruits))[['p.value']])
+# 
+# mods<-unique(plot_dat3$model)
+# output<-NULL
+# library(mgcv)
+# AICs<-matrix(nrow=length(mods),ncol=2)
+# for(x in 1:length(mods))
+# {
+#  tmp<-filter(plot_dat3,model== mods[x])  
+#  mod<-gam(data=tmp,as.numeric(Recruits)~s(SSB,k=3))  
+#  mod_0<-gam(data=tmp,as.numeric(Recruits)~1)
+# 
+#  pred_ssb<-data.frame(SSB=seq(min(tmp$SSB),max(tmp$SSB),length.out=50))
+#  pred_mod<-predict(mod,newdata=pred_ssb)
+#  pred_mod_0<-predict(mod_0,newdata=pred_ssb)
+#  AICs[x,1]<-AIC(mod)
+#  AICs[x,2]<-AIC(mod_0)
+#  outs<-data.frame(SSB=pred_ssb,pred_r=pred_mod,
+#             pred_0=pred_mod_0,model=mods[x])
+#  output<-rbind(output,outs)
+# }
+# 
+# 
+# 
+# sm_dat<-filter(plot_dat3,model=="24.1 update_gmacs")
+# 
+# 
+# 
+# 
+# ggplot()+
+#   geom_point(data=plot_dat3,aes(x=SSB,y=as.numeric(Recruits),col=model))+
+#   geom_line(data=output,aes(x=SSB,y=pred_r),col='red',lwd=1.2)+
+#     geom_line(data=output,aes(x=SSB,y=pred_0),col='black',lwd=1.2)+
+#   facet_wrap(~model,scales='free')+theme_bw()+
+#   expand_limits(y=0,x=0)+
+#   theme(legend.position=c(.85,.15))
+# 
+# yerout<-ggplot()+
+#   geom_point(data=filter(plot_dat3,model=="25.3 update growth"),aes(x=SSB,y=as.numeric(Recruits),col=model),size=5)+
+#   #geom_line(data=filter(output,model=="25.3 update growth"),aes(x=SSB,y=pred_r),col='red',lwd=1.2)+
+#     geom_line(data=filter(output,model=="25.3 update growth"),aes(x=SSB,y=pred_0),col='black',lwd=1.2)+
+#   facet_wrap(~model,scales='free')+theme_bw()+
+#   expand_limits(y=0,x=0)+
+#   theme(legend.position='none')+ylab("Recruits")+xlab("MMB")+
+#   geom_vline(xintercept=0.2*max(filter(output,model=="25.3 update growth")$SSB),lty=2)
+
+    # png("plots/recruit_mmb.png",height=6,width=6,res=300,units='in')
+    # print(yerout)
+    # dev.off()
+    # 
+    
+    
+```
+
+
+\newpage
+
+```{r,echo=FALSE,warning=FALSE,message=F,fig.height=10,fig.width=8,fig.cap="\\label{recruit_spec_h}Estimated recruitment by sex (bottom) and proportions recruiting to length bin (top) by model."}
+
+# 
+#   dfr_m = wtsGMACS::extractRep1Results(reslst,"Summary") |> 
+#           dplyr::select(case,year,rec_male)
+# 
+# 
+# recs_df<-NULL
+# for(i in 1:length(M))
+# {
+#   indf<-data.frame(Recruits=c(M[[i]]$recruits[1,]),
+#                    sex=c(rep("Male",ncol(M[[i]]$recruits))),
+#                    Year=c(M[[i]]$mod_yrs-5),
+#                    model=mod_names[i])
+#   recs_df<-rbind(recs_df,indf)
+# }
+# dfr_m$sex<-"Male"
+# colnames(dfr_m)<-c("model","Year","Recruits","sex")
+# 
+# 
+# plot_dat<-rbind(recs_df,dfr_f[,c(3,4,2,1)],dfr_m[,c(3,4,2,1)])
+#  dfr = wtsGMACS::extractRep1Results(reslst,"Summary") |> 
+#           dplyr::select(case,year,SSB)
+# ssb_df<-NULL
+# for(i in 1:length(M))
+# {
+#   indf<-data.frame(SSB=M[[i]]$ssb,
+#                    Year=M[[i]]$mod_yrs,
+#                    model=mod_names[i])
+#   ssb_df<-rbind(ssb_df,indf)
+# }
+# 
+# colnames(dfr)[c(1:2)]<-c("model","Year")
+# 
+# plot_dat2<-rbind(ssb_df,dfr[,c(3,2,1)])
+# plot_dat2$SSB<-as.numeric(plot_dat2$SSB)
+# plot_dat2$year<-as.numeric(plot_dat2$Year)
+# 
+# plot_dat3<-merge(plot_dat2,plot_dat)
+# 
+# 
+# estimate_ricker <- function(data, steepness, spr0 = 1) {
+#   # data: a dataframe with 'recruits' and 'ssb'
+#   # steepness: fixed steepness value (h)
+#   # spr0: spawning biomass per recruit under F=0 (defaults to 1)
+# 
+#   # Define the model in terms of R0 (unfished recruitment)
+#   ricker_model <- function(R0, ssb, recruits, h, spr0) {
+#     ssb0 <- R0 * spr0
+#     alpha <- log(5 * h) / (0.8 * ssb0)
+#     beta <- log(5) / (0.8 * ssb0)
+#     pred_recruits <- ssb * alpha * exp(-beta * ssb)
+#     sum((recruits - pred_recruits)^2)  # SSE
+#   }
+# 
+#   # Minimize SSE using optim
+#   fit <- optim(par = mean(data$recruits),  # initial R0 guess
+#                fn = function(R0) ricker_model(R0, data$ssb, data$recruits, steepness, spr0),
+#                method = "Brent",
+#                lower = 1e-6, upper = max(data$recruits) * 10)
+# 
+#   # Return estimated R0 and fitted values
+#   R0_hat <- fit$par
+#   ssb0 <- R0_hat * spr0
+#   alpha <- log(5 * steepness) / (0.8 * ssb0)
+#   beta <- log(5) / (0.8 * ssb0)
+#   predicted <- data$ssb * alpha * exp(-beta * data$ssb)
+# 
+#   return(list(
+#     R0 = R0_hat,
+#     steepness = steepness,
+#     predicted = predicted,
+#     residuals = data$recruits - predicted,
+#     ssb0 = ssb0,
+#     alpha = alpha,
+#     beta = beta,
+#     sse = fit$value
+#   ))
+# }
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# ricker<-function(x,h)
+# {
+#  theta <-SSB_zero/x[1]
+#  pred_rec <- (SSB/(theta))*(5*h)^(5/4)*(1-(SSB/(rec_zero*theta)))
+#    
+# }
+# 
+# mods<-unique(plot_dat3$model)
+# output<-NULL
+# library(mgcv)
+# AICs<-matrix(nrow=length(mods),ncol=2)
+# steepnesses<-c(0.4,0.5,0.67,0.8,0.9)
+# for(x in 1:length(mods))
+# for(y in 1:steepnesses)
+# {
+#  tmp<-filter(plot_dat3,model== mods[x])  
+#  mod<-gam(data=tmp,as.numeric(Recruits)~s(SSB,k=3))  
+#  mod_0<-gam(data=tmp,as.numeric(Recruits)~1)
+# 
+#  pred_ssb<-data.frame(SSB=seq(min(tmp$SSB),max(tmp$SSB),length.out=50))
+#  pred_mod<-predict(mod,newdata=pred_ssb)
+#  pred_mod_0<-predict(mod_0,newdata=pred_ssb)
+#  AICs[x,1]<-AIC(mod)
+#  AICs[x,2]<-AIC(mod_0)
+#  outs<-data.frame(SSB=pred_ssb,pred_r=pred_mod,
+#             pred_0=pred_mod_0,model=mods[x])
+#  output<-rbind(output,outs)
+# }
+# 
+# 
+# ggplot()+
+#   geom_point(data=plot_dat3,aes(x=SSB,y=as.numeric(Recruits),col=model))+
+#   geom_line(data=output,aes(x=SSB,y=pred_r),col='red',lwd=1.2)+
+#     geom_line(data=output,aes(x=SSB,y=pred_0),col='black',lwd=1.2)+
+#   facet_wrap(~model,scales='free')+theme_bw()+
+#   expand_limits(y=0,x=0)+
+#   theme(legend.position=c(.85,.15))
+
+
+
+```
+
+\newpage
+
+
+```{r,echo=FALSE,warning=FALSE,message=F,fig.height=10,fig.width=8,fig.cap="\\label{nat_m}Estimated natural mortality by sex and maturity state. Natural mortality in all years previous to 2018 and after 2019 are equal to the estimated M in 2017. "}
+
+    mdf <- .get_M_df(M)
+
+     dfrMbyXM = wtsGMACS::extractRep1Results(reslst,"Natural_mortality-by-class") |> 
+                 tidyr::pivot_longer(cols=!c(case,year,sex,maturity),
+                                    names_to="size",values_to="est") |> 
+                dplyr::mutate(dplyr::across(c(year,size,est),as.numeric)) |> 
+                dplyr::mutate(xm=paste(maturity,sex)) |> 
+                dplyr::group_by(case,xm,sex,maturity,year) |> 
+                dplyr::ungroup();
+    new_m<- filter(dfrMbyXM,size==27.5)
+     
+  colnames(new_m)[c(1,2,4,6)]<-c("Year","Sex","Model","M")
+  
+  plot_dat<-rbind(mdf,new_m[,c(4,1,2,6,3)])
+   plot_dat$maturity[plot_dat$maturity=='immature']<-"Immature"  
+   plot_dat$maturity[plot_dat$maturity=='mature']<-"Mature"    
+      ggplot(plot_dat, aes(x = Year, y = M, colour = Model))+
+      geom_line(lwd=1.15,alpha=.8)+
+     facet_wrap(~Sex+maturity)+
+     theme_bw()+theme(legend.position=c(.8,.8))+
+      xlim(2015,2022)+expand_limits(y=0)+
+        ylim(0,21)
+  
+
+    
+    
+
+```
+ 
+\newpage
+
+
+
+
+```{r,echo=FALSE,warning=FALSE,message=F,fig.height=8,fig.width=8,fig.cap="\\label{predmmb}Model predicted mature male biomass at mating time in 1,000 tonnes. "}
+#=========================================================
+#  Plot derived quantities
+#=========================================================
+
+ dfr = wtsGMACS::extractRep1Results(reslst,"Summary") |> 
+          dplyr::select(case,year,SSB)
+
+ssb_df<-NULL
+for(i in 1:length(M))
+{
+  indf<-data.frame(SSB=M[[i]]$ssb,
+                   year=M[[i]]$mod_yrs,
+                   model=mod_names[i])
+  ssb_df<-rbind(ssb_df,indf)
+}
+
+colnames(dfr)[1]<-"model"
+
+plot_dat<-rbind(ssb_df,dfr[,c(3,2,1)])
+plot_dat$SSB<-as.numeric(plot_dat$SSB)
+plot_dat$year<-as.numeric(plot_dat$year)
+allup<-ggplot(plot_dat)+
+  geom_line(aes(x=year,y=SSB,col=model),lwd=1.1)+
+  theme_bw()+theme(legend.position=c(.8,.8))+ylab("MMB (1,000t)")+
+  expand_limits(y=0)
+
+print(allup)
+
+```
+

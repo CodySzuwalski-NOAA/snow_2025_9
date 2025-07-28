@@ -1,0 +1,26 @@
+# TheHeader
+## GMACS Version 2.01.M.02; ** CSS **; Compiled 2023-04-12 13:05:39
+# datafile
+snow.dat
+# controlfile
+snow.ctl
+# projectfile
+snow.prj
+# IsJittered
+0
+# sdJitter
+0.1
+# OutRefPars
+0
+# OutRecruit
+1
+# OutSSB
+1
+# Outfbar
+0
+# OutDynB0
+0
+# nyrRetro
+0
+# dataeof
+9999
